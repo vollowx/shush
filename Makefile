@@ -1,6 +1,6 @@
 CC=gcc
-CFLAGS=-Wall -Wextra -Ithirdparty
-LIBS=
+CFLAGS=-Wall -Ithirdparty -fsanitize=address
+LIBS=-lreadline
 
 TARGET=shush
 

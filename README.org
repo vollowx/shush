@@ -1,5 +1,10 @@
 * shush
 A shell.
 
+** Dependencies
+- ~make~
+- ~gcc~
+- ~readline~
+
 ** References
 - [[https://brennan.io/2015/01/16/write-a-shell-in-c/][Write a Shell in C]]

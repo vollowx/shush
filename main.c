@@ -6,6 +6,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <readline/history.h>
+#include <readline/readline.h>
+
 #define BUF_REALLOC(buffer, type)                                              \
   do {                                                                         \
     buf_size *= 1.5;                                                           \
@@ -17,35 +20,42 @@
   } while (0)
 
 #define SHUSH_EXECUTABLE_NAME "shush" // TODO: Define in Makefile
-#define SHUSH_LINE_BUF_SIZE 1024
+#define SHUSH_PROMPT_BUF_SIZE 1024
 #define SHUSH_TOKEN_BUF_SIZE 64
 #define SHUSH_TOKEN_DELIM " \t\r\n\a"
 
-char *shush_read_line(void) {
-  int buf_size = SHUSH_LINE_BUF_SIZE;
-  int pos = 0;
-  char *buffer = malloc(sizeof(char) * buf_size);
-  int c;
-  if (!buffer) {
-    fprintf(stderr, "shush: failed to allocate line buffer");
-    exit(EXIT_FAILURE);
-  }
+typedef struct {
+  char *hostname;
+  char *username;
 
-  while (1) {
-    c = getchar();
+  int status;
+  bool should_exit;
+} shush_info_t;
 
-    if (c == EOF || c == '\n') {
-      buffer[pos] = '\0';
-      return buffer;
-    } else {
-      buffer[pos] = c;
-      ++pos;
-    }
+shush_info_t *shush_info_alloc() {
+  shush_info_t *info = malloc(sizeof(shush_info_t));
+  info->hostname = malloc(sizeof(char) * 64);
+  info->username = malloc(sizeof(char) * 64);
+  info->status = 0;
+  info->should_exit = false;
+  return info;
+}
+void shush_info_query(shush_info_t *info) { gethostname(info->hostname, 64); }
+void shush_info_free(shush_info_t *info) {
+  free(info->hostname);
+  free(info->username);
+  free(info);
+}
 
-    if (pos >= buf_size) {
-      BUF_REALLOC(buffer, char);
-    }
-  }
+char *shush_read_line(shush_info_t *shush_info) {
+  char *prompt_buffer = malloc(sizeof(char) * SHUSH_PROMPT_BUF_SIZE);
+  sprintf(prompt_buffer, "(%d) > ", shush_info->status);
+
+  char *buffer = readline(prompt_buffer);
+
+  free(prompt_buffer);
+
+  return buffer;
 }
 
 char **shush_parse_line(char *line) {
@@ -53,7 +63,8 @@ char **shush_parse_line(char *line) {
   char **tokens = malloc(sizeof(char *) * buf_size);
   char *token;
   if (!tokens) {
-    fprintf(stderr, "%s: failed to allocate token buffer", SHUSH_EXECUTABLE_NAME);
+    fprintf(stderr, "%s: failed to allocate token buffer",
+            SHUSH_EXECUTABLE_NAME);
     exit(EXIT_FAILURE);
   }
 
@@ -72,8 +83,6 @@ char **shush_parse_line(char *line) {
 
   return tokens;
 }
-
-bool shush_should_exit = 0;
 
 int shush_execute(char **args) {
   pid_t pid;
@@ -98,18 +107,19 @@ int shush_execute(char **args) {
   return status;
 }
 
-int shush_cd(char **args);
-int shush_help(char **args);
-int shush_exit(char **args);
+int shush_cd(shush_info_t *info, char **args);
+int shush_help(shush_info_t *info, char **args);
+int shush_exit(shush_info_t *info, char **args);
 char *builtin_str[] = {"cd", "help", "exit"};
 
-int (*builtin_func[])(char **) = {&shush_cd, &shush_help, &shush_exit};
+int (*builtin_func[])(shush_info_t *info, char **) = {&shush_cd, &shush_help,
+                                                      &shush_exit};
 
 int shush_num_builtins() { return sizeof(builtin_str) / sizeof(char *); }
 
-int shush_cd(char **args) {
+int shush_cd(shush_info_t *info, char **args) {
   if (args[1] == NULL) {
-    fprintf(stderr, "shush: expected argument to \"cd\"\n");
+    fprintf(stderr, "%s: expected argument to \"cd\"\n", SHUSH_EXECUTABLE_NAME);
   } else {
     if (chdir(args[1]) != 0) {
       perror("shush");
@@ -118,7 +128,7 @@ int shush_cd(char **args) {
   return 0;
 }
 
-int shush_help(char **args) {
+int shush_help(shush_info_t *info, char **args) {
   int i;
   printf("%s the shell\n", SHUSH_EXECUTABLE_NAME);
   printf("Builtins:\n");
@@ -130,12 +140,12 @@ int shush_help(char **args) {
   return 0;
 }
 
-int shush_exit(char **args) {
-  shush_should_exit = true;
+int shush_exit(shush_info_t *info, char **args) {
+  info->should_exit = true;
   return 0;
 }
 
-int shush_run(char **args) {
+int shush_run(shush_info_t *info, char **args) {
   int i;
 
   if (args[0] == NULL) {
@@ -144,32 +154,37 @@ int shush_run(char **args) {
 
   for (i = 0; i < shush_num_builtins(); ++i) {
     if (strcmp(args[0], builtin_str[i]) == 0) {
-      return (*builtin_func[i])(args);
+      return (*builtin_func[i])(info, args);
     }
   }
 
   return shush_execute(args);
 }
 
-void shush_loop(void) {
+void shush_loop(shush_info_t *info) {
   char *line;
   char **args;
-  static int status;
 
   do {
-    printf("%3d:> ", status);
-    line = shush_read_line();
+    line = shush_read_line(info);
     args = shush_parse_line(line);
-    status = shush_run(args);
+    info->status = shush_run(info, args);
 
     free(line);
     free(args);
-  } while (!shush_should_exit);
+  } while (!info->should_exit);
 }
 
 int main(int argc, char **argv) {
-  printf("Welcome to %s, %s\n", "dearPC", "Sailor");
-  shush_loop();
+  rl_initialize();
+
+  shush_info_t *shush_info = shush_info_alloc();
+  shush_info_query(shush_info);
+
+  printf("Welcome to %s, %s\n", shush_info->hostname, "Somebody");
+  shush_loop(shush_info);
+
+  shush_info_free(shush_info);
 
   return EXIT_SUCCESS;
 }
