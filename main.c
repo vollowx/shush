@@ -9,6 +9,10 @@
 #include <readline/history.h>
 #include <readline/readline.h>
 
+#include "builtin.h"
+#include "config.h"
+#include "info.h"
+
 #define BUF_REALLOC(buffer, type)                                              \
   do {                                                                         \
     buf_size *= 1.5;                                                           \
@@ -19,57 +23,10 @@
     }                                                                          \
   } while (0)
 
-#define SHUSH_EXECUTABLE_NAME "shush" // TODO: Define in Makefile
-#define SHUSH_PROMPT_BUF_SIZE 1024
-#define SHUSH_TOKEN_BUF_SIZE 64
-#define SHUSH_TOKEN_DELIM " \t\r\n\a"
-
-typedef struct {
-  char *hostname;
-  char *username;
-
-  bool is_root;
-  int status;
-  bool should_exit;
-} shush_info_t;
-
-shush_info_t *shush_info_alloc() {
-  shush_info_t *info = malloc(sizeof(shush_info_t));
-  if (!info)
-    goto error_alloc;
-
-  info->hostname = malloc(sizeof(char) * 64);
-  if (!info->hostname)
-    goto error_suballoc;
-
-  info->is_root = false;
-  info->status = 0;
-  info->should_exit = false;
-
-  return info;
-
-error_suballoc:
-  free(info->hostname);
-error_alloc:
-  free(info);
-  return NULL;
-}
-void shush_info_get(shush_info_t *info) {
-  if (gethostname(info->hostname, 64) != 0)
-    perror("gethostname");
-  if ((info->username = getenv("USER")) == NULL)
-    fprintf(stderr, "%s: failed to get username", SHUSH_EXECUTABLE_NAME);
-  if (geteuid() == 0)
-    info->is_root = true;
-}
-void shush_info_free(shush_info_t *info) {
-  free(info->hostname);
-  free(info);
-}
-
 char *shush_read_line(shush_info_t *shush_info) {
-  char *prompt_buffer = malloc(sizeof(char) * SHUSH_PROMPT_BUF_SIZE);
-  sprintf(prompt_buffer, "(%d) %c ", shush_info->status, shush_info->is_root ? '#' : '$');
+  char *prompt_buffer = malloc(sizeof(char) * SHUSH_PROMPT_BUFSIZE);
+  sprintf(prompt_buffer, "(%d) %c ", shush_info->status,
+          shush_info->is_root ? '#' : '$');
 
   char *buffer = readline(prompt_buffer);
 
@@ -78,8 +35,32 @@ char *shush_read_line(shush_info_t *shush_info) {
   return buffer;
 }
 
-char **shush_parse_line(char *line) {
-  int buf_size = SHUSH_TOKEN_BUF_SIZE, pos = 0;
+char **shush_split_pipes(char *line) {
+  int buf_size = SHUSH_PIPE_BUFSIZE, pos = 0;
+  char **commands = malloc(sizeof(char *) * buf_size);
+  char *command;
+  if (!commands) {
+    fprintf(stderr, "%s: failed to allocate token buffer",
+            SHUSH_EXECUTABLE_NAME);
+    exit(EXIT_FAILURE);
+  }
+
+  command = strtok(line, SHUSH_PIPE_DELIM);
+  while (command != NULL) {
+    commands[pos] = command;
+    ++pos;
+
+    if (pos >= buf_size) {
+      BUF_REALLOC(commands, char *);
+    }
+    command = strtok(NULL, SHUSH_PIPE_DELIM);
+  }
+  commands[pos] = NULL;
+  return commands;
+}
+
+char **shush_parse_command(char *command) {
+  int buf_size = SHUSH_TOKEN_BUFSIZE, pos = 0;
   char **tokens = malloc(sizeof(char *) * buf_size);
   char *token;
   if (!tokens) {
@@ -88,7 +69,7 @@ char **shush_parse_line(char *line) {
     exit(EXIT_FAILURE);
   }
 
-  token = strtok(line, SHUSH_TOKEN_DELIM);
+  token = strtok(command, SHUSH_TOKEN_DELIM);
   while (token != NULL) {
     tokens[pos] = token;
     ++pos;
@@ -127,48 +108,57 @@ int shush_execute(char **args) {
   return status;
 }
 
-int shush_cd(shush_info_t *info, char **args);
-int shush_help(shush_info_t *info, char **args);
-int shush_welcome(shush_info_t *info, char **args);
-int shush_exit(shush_info_t *info, char **args);
-char *builtin_str[] = {"cd", "help", "welcome", "exit"};
+int shush_run_pipeline(char **commands) {
+  int i = 0;
+  int fd_input = 0, fd[2]; // fd[0] for reading, fd[1] for writing
 
-int (*builtin_func[])(shush_info_t *info, char **) = {
-    &shush_cd, &shush_help, &shush_welcome, &shush_exit};
+  pid_t pid;
+  int status = 0;
 
-int shush_num_builtins() { return sizeof(builtin_str) / sizeof(char *); }
+  while (commands[i] != NULL) {
+    pipe(fd);
+    pid = fork();
 
-int shush_cd(shush_info_t *info, char **args) {
-  if (args[1] == NULL) {
-    fprintf(stderr, "%s: expected argument to \"cd\"\n", SHUSH_EXECUTABLE_NAME);
-  } else {
-    if (chdir(args[1]) != 0) {
-      perror("shush");
+    if (pid == 0) {
+      // Is child process
+      if (fd_input !=
+          0) { // If isn't the first command, read from the prev pipe
+        dup2(fd_input, STDIN_FILENO);
+        close(fd_input);
+      }
+      if (commands[i + 1] != NULL) { // If isn't the last, write to the current
+        dup2(fd[1], STDOUT_FILENO);
+      }
+      close(fd[0]);
+      close(fd[1]);
+
+      char **args = shush_parse_command(commands[i]);
+
+      if (args[0] == NULL)
+        exit(EXIT_SUCCESS);
+
+      if (execvp(args[0], args) == -1) {
+        perror(SHUSH_EXECUTABLE_NAME " pipeline execution");
+      }
+      exit(EXIT_FAILURE);
+    } else if (pid < 0) {
+      perror(SHUSH_EXECUTABLE_NAME " pipeline forking");
+    } else {
+      // Is parent process
+      if (fd_input != 0)
+        close(fd_input);
+      close(fd[1]);
+      fd_input = fd[0];
+      ++i;
     }
   }
-  return 0;
-}
 
-int shush_help(shush_info_t *info, char **args) {
-  int i;
-  printf("%s the shell\n", SHUSH_EXECUTABLE_NAME);
-  printf("Builtins:\n");
+  if (fd_input != 0)
+    close(fd_input);
+  while (wait(&status) > 0)
+    ;
 
-  for (i = 0; i < shush_num_builtins(); i++) {
-    printf("  %s\n", builtin_str[i]);
-  }
-
-  return 0;
-}
-
-int shush_welcome(shush_info_t *info, char **args) {
-  printf("Welcome to %s, %s\n", info->hostname, info->username);
-  return 0;
-}
-
-int shush_exit(shush_info_t *info, char **args) {
-  info->should_exit = true;
-  return 0;
+  return status;
 }
 
 int shush_run(shush_info_t *info, char **args) {
@@ -189,15 +179,22 @@ int shush_run(shush_info_t *info, char **args) {
 
 void shush_loop(shush_info_t *info) {
   char *line;
-  char **args;
+  char **commands;
 
   do {
     line = shush_read_line(info);
-    args = shush_parse_line(line);
-    info->status = shush_run(info, args);
+    commands = shush_split_pipes(line);
 
+    if (commands[0] != NULL && commands[1] == NULL) {
+      char **args = shush_parse_command(commands[0]);
+      info->status = shush_run(info, args);
+      free(args);
+    } else {
+      info->status = shush_run_pipeline(commands);
+    }
+
+    free(commands);
     free(line);
-    free(args);
   } while (!info->should_exit);
 }
 

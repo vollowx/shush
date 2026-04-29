@@ -4,7 +4,7 @@ LIBS=-lreadline
 
 TARGET=shush
 
-SRC=main.c
+SRC=main.c builtin.c info.c
 
 all: $(TARGET)
 
