@@ -28,28 +28,48 @@ typedef struct {
   char *hostname;
   char *username;
 
+  bool is_root;
   int status;
   bool should_exit;
 } shush_info_t;
 
 shush_info_t *shush_info_alloc() {
   shush_info_t *info = malloc(sizeof(shush_info_t));
+  if (!info)
+    goto error_alloc;
+
   info->hostname = malloc(sizeof(char) * 64);
-  info->username = malloc(sizeof(char) * 64);
+  if (!info->hostname)
+    goto error_suballoc;
+
+  info->is_root = false;
   info->status = 0;
   info->should_exit = false;
+
   return info;
+
+error_suballoc:
+  free(info->hostname);
+error_alloc:
+  free(info);
+  return NULL;
 }
-void shush_info_query(shush_info_t *info) { gethostname(info->hostname, 64); }
+void shush_info_get(shush_info_t *info) {
+  if (gethostname(info->hostname, 64) != 0)
+    perror("gethostname");
+  if ((info->username = getenv("USER")) == NULL)
+    fprintf(stderr, "%s: failed to get username", SHUSH_EXECUTABLE_NAME);
+  if (geteuid() == 0)
+    info->is_root = true;
+}
 void shush_info_free(shush_info_t *info) {
   free(info->hostname);
-  free(info->username);
   free(info);
 }
 
 char *shush_read_line(shush_info_t *shush_info) {
   char *prompt_buffer = malloc(sizeof(char) * SHUSH_PROMPT_BUF_SIZE);
-  sprintf(prompt_buffer, "(%d) > ", shush_info->status);
+  sprintf(prompt_buffer, "(%d) %c ", shush_info->status, shush_info->is_root ? '#' : '$');
 
   char *buffer = readline(prompt_buffer);
 
@@ -109,11 +129,12 @@ int shush_execute(char **args) {
 
 int shush_cd(shush_info_t *info, char **args);
 int shush_help(shush_info_t *info, char **args);
+int shush_welcome(shush_info_t *info, char **args);
 int shush_exit(shush_info_t *info, char **args);
-char *builtin_str[] = {"cd", "help", "exit"};
+char *builtin_str[] = {"cd", "help", "welcome", "exit"};
 
-int (*builtin_func[])(shush_info_t *info, char **) = {&shush_cd, &shush_help,
-                                                      &shush_exit};
+int (*builtin_func[])(shush_info_t *info, char **) = {
+    &shush_cd, &shush_help, &shush_welcome, &shush_exit};
 
 int shush_num_builtins() { return sizeof(builtin_str) / sizeof(char *); }
 
@@ -137,6 +158,11 @@ int shush_help(shush_info_t *info, char **args) {
     printf("  %s\n", builtin_str[i]);
   }
 
+  return 0;
+}
+
+int shush_welcome(shush_info_t *info, char **args) {
+  printf("Welcome to %s, %s\n", info->hostname, info->username);
   return 0;
 }
 
@@ -178,13 +204,13 @@ void shush_loop(shush_info_t *info) {
 int main(int argc, char **argv) {
   rl_initialize();
 
-  shush_info_t *shush_info = shush_info_alloc();
-  shush_info_query(shush_info);
+  shush_info_t *info = shush_info_alloc();
+  shush_info_get(info);
 
-  printf("Welcome to %s, %s\n", shush_info->hostname, "Somebody");
-  shush_loop(shush_info);
+  shush_welcome(info, NULL);
+  shush_loop(info);
 
-  shush_info_free(shush_info);
+  shush_info_free(info);
 
   return EXIT_SUCCESS;
 }
